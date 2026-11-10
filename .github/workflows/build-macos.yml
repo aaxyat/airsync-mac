@@ -125,7 +125,7 @@ jobs:
 
           **Install:** unzip, drag `AirSync.app` to `/Applications`, then right-click → **Open** the first time (the app is not notarized, so Gatekeeper quarantines it). If macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/AirSync.app`.
 
-          **Note:** this build is signed with a self-signed certificate, so it cannot auto-update through Sparkle; install new releases manually. Pairing keys and preferences are preserved across updates because the bundle identifier is unchanged.
+          **Note:** these builds are ad-hoc signed and not notarized, and no update feed is published for them, so Sparkle will not offer them as updates; install new releases manually. Pairing keys and preferences are preserved because the bundle identifier is unchanged.
 
           SHA-256 checksums are in `SHA256SUMS-macOS.txt`.
           NOTES_EOF
