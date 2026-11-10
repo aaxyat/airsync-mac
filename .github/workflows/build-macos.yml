@@ -1,10 +1,23 @@
 name: Build macOS App
 
 on:
+  push:
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build/release, e.g. 4.2.0 (empty = the project's version)"
+        required: false
+        type: string
+      release:
+        description: "Publish a GitHub release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-macos-${{ github.ref }}
@@ -20,6 +33,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$INPUT_VERSION"
+          if [ -z "$VERSION" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/v*) VERSION="${GITHUB_REF_NAME#v}" ;;
+              *) VERSION="$(xcodebuild -project AirSync.xcodeproj \
+                            -scheme "AirSync Self Compiled" \
+                            -showBuildSettings 2>/dev/null \
+                            | awk -F' = ' '/ MARKETING_VERSION /{print $2; exit}')" ;;
+            esac
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve a version"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
 
       - name: Show toolchain
         run: |
@@ -37,13 +73,17 @@ jobs:
             -destination "generic/platform=macOS" \
             -derivedDataPath "$RUNNER_TEMP/dd" \
             ARCHS=arm64 \
+            MARKETING_VERSION="${{ steps.v.outputs.version }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
 
       - name: Ad-hoc sign and package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
+          set -euo pipefail
           APP="$RUNNER_TEMP/dd/Build/Products/Self Compiled/AirSync.app"
           if [ ! -d "$APP" ]; then
             echo "::error::AirSync.app not found at $APP"
@@ -53,13 +93,53 @@ jobs:
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
           echo "Ad-hoc signature OK"
-          ditto -c -k --keepParent "$APP" "AirSync-macOS.zip"
-          ls -lh "AirSync-macOS.zip"
+          ZIP="AirSync-${VERSION}-macOS.zip"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          shasum -a 256 "$ZIP" > SHA256SUMS-macOS.txt
+          cat SHA256SUMS-macOS.txt
+          ls -lh "$ZIP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist"
 
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:
           name: AirSync-macOS
-          path: AirSync-macOS.zip
+          path: |
+            AirSync-*-macOS.zip
+            SHA256SUMS-macOS.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          NOTES="$RUNNER_TEMP/notes.md"
+          cat > "$NOTES" <<'NOTES_EOF'
+          Ad-hoc signed build of AirSync for macOS (Apple silicon, arm64).
+
+          **Install:** unzip, drag `AirSync.app` to `/Applications`, then right-click → **Open** the first time (the app is not notarized, so Gatekeeper quarantines it). If macOS still refuses, run `xattr -dr com.apple.quarantine /Applications/AirSync.app`.
+
+          **Note:** this build is signed with a self-signed certificate, so it cannot auto-update through Sparkle; install new releases manually. Pairing keys and preferences are preserved across updates because the bundle identifier is unchanged.
+
+          SHA-256 checksums are in `SHA256SUMS-macOS.txt`.
+          NOTES_EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; updating it"
+            gh release edit "$TAG" --title "AirSync ${VERSION}" --notes-file "$NOTES"
+            gh release upload "$TAG" AirSync-*-macOS.zip SHA256SUMS-macOS.txt --clobber
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" \
+              --title "AirSync ${VERSION}" \
+              --notes-file "$NOTES" \
+              --target "$GITHUB_SHA" \
+              AirSync-*-macOS.zip SHA256SUMS-macOS.txt
+          fi
+          gh release view "$TAG" --json tagName,name,assets \
+            --jq '.tagName + " -> " + (.assets | map(.name) | join(", "))'
