@@ -12,7 +12,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Public-preview image with Xcode 27.2 (the project's .icon bundle
+    # crashes Xcode 26.x actool); matches the maintainer's local toolchain.
+    runs-on: xcode-27
     timeout-minutes: 60
 
     steps:
